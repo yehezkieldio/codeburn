@@ -190,4 +190,47 @@ describe('gemini provider', () => {
     expect(calls).toEqual([])
     expect(seenKeys.has('gemini:gemini-session-1:g1')).toBe(false)
   })
+
+  // Gemini CLI >=0.39 writes one JSON object per line (header, per-message
+  // entries, and `{"$set":{"lastUpdated":...}}` heartbeat lines appended on
+  // every turn) instead of the single-JSON blob the fixtures above use.
+  // Session files in this format are streamed line-by-line rather than read
+  // whole, so a long-lived session's heartbeat spam can't run the file past
+  // the (much smaller) whole-file read cap and silently drop to zero calls.
+  it('parses the >=0.39 line-delimited journal format, ignoring $set heartbeat lines', async () => {
+    const filePath = join(tmpDir, 'session-gemini.jsonl')
+    const lines = [
+      JSON.stringify({ sessionId: 'gemini-session-2', startTime: '2026-05-16T10:00:00.000Z', kind: 'main' }),
+      JSON.stringify({ $set: { lastUpdated: '2026-05-16T10:00:01.000Z' } }),
+      JSON.stringify({ id: 'u1', timestamp: '2026-05-16T10:00:00.000Z', type: 'user', content: 'inspect the repo' }),
+      JSON.stringify({ $set: { lastUpdated: '2026-05-16T10:00:04.000Z' } }),
+      JSON.stringify({
+        id: 'g1',
+        timestamp: '2026-05-16T10:00:05.000Z',
+        type: 'gemini',
+        content: 'reading files',
+        model: 'gemini-3.1-pro-preview',
+        thoughts: [],
+        tokens: { input: 120, cached: 20, output: 30, thoughts: 5 },
+        toolCalls: [{ id: 't1', name: 'read_file', args: { path: 'src/index.ts' } }],
+      }),
+      JSON.stringify({ $set: { lastUpdated: '2026-05-16T10:00:06.000Z' } }),
+    ]
+    await writeFile(filePath, lines.join('\n') + '\n')
+
+    const provider = createGeminiProvider()
+    const calls: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(
+      { path: filePath, project: 'gemini-project', provider: 'gemini' },
+      new Set(),
+    ).parse()) {
+      calls.push(call)
+    }
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.deduplicationKey).toBe('gemini:gemini-session-2:g1')
+    expect(calls[0]!.inputTokens).toBe(100)
+    expect(calls[0]!.cacheReadInputTokens).toBe(20)
+    expect(calls[0]!.tools).toEqual(['Read'])
+  })
 })

@@ -2,7 +2,7 @@ import { readdir, stat } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 
-import { readSessionFile } from '../fs-utils.js'
+import { readSessionFile, readSessionLines } from '../fs-utils.js'
 import { calculateCost } from '../models.js'
 import { extractBashCommands } from '../bash-utils.js'
 import type { ProbeRoot, Provider, SessionSource, SessionParser, ParsedProviderCall } from './types.js'
@@ -149,10 +149,16 @@ function parseSession(data: GeminiSession, seenKeys: Set<string>): ParsedProvide
   return results
 }
 
-function parseJsonl(raw: string): GeminiSession | null {
-  const lines = raw.split('\n').filter(l => l.trim())
-  if (lines.length === 0) return null
-
+// Gemini CLI >=0.39 writes one JSON object per line: a header, per-message
+// entries, and periodic `{"$set":{"lastUpdated":...}}` heartbeat lines that
+// get appended on every turn (and occasionally a batched `{"$set":{"messages":
+// [...]}}` checkpoint). A long-lived session's heartbeat spam alone can run
+// the file into the hundreds of MB, so this streams line-by-line
+// (readSessionLines, 4 GB cap) instead of materializing the whole file
+// (readSessionFile, 128 MB cap) - a file over the old cap was silently
+// dropped with zero calls and zero warning by default (issue: Gemini sessions
+// >128MB parsed to $0).
+async function parseJsonlStreaming(path: string): Promise<GeminiSession | null> {
   let sessionId = ''
   let startTime = ''
   let projectHash: string | undefined
@@ -160,7 +166,8 @@ function parseJsonl(raw: string): GeminiSession | null {
   let kind: string | undefined
   const messages: GeminiMessage[] = []
 
-  for (const line of lines) {
+  for await (const line of readSessionLines(path)) {
+    if (!line.trim()) continue
     let obj: Record<string, unknown>
     try {
       obj = JSON.parse(line)
@@ -174,6 +181,14 @@ function parseJsonl(raw: string): GeminiSession | null {
       projectHash = obj['projectHash'] as string | undefined
       lastUpdated = obj['lastUpdated'] as string | undefined
       kind = obj['kind'] as string | undefined
+      // The legacy single-JSON format (<=0.38) is one compact (unindented)
+      // object per line when readSessionLines sees it as a whole - it has no
+      // internal newlines, so it arrives here as ONE "header" line that also
+      // embeds the full messages array inline. Capture it so a compact
+      // legacy file (e.g. a test fixture written via JSON.stringify with no
+      // indent) parses correctly without falling through to the
+      // whole-file JSON.parse fallback.
+      if (Array.isArray(obj['messages'])) messages.push(...(obj['messages'] as GeminiMessage[]))
     } else if (obj['id'] && obj['type']) {
       messages.push(obj as unknown as GeminiMessage)
     }
@@ -183,26 +198,27 @@ function parseJsonl(raw: string): GeminiSession | null {
   return { sessionId, projectHash, startTime, lastUpdated, kind, messages }
 }
 
+// Gemini CLI <=0.38 wrote the whole session as ONE (possibly pretty-printed)
+// JSON document, which line-by-line streaming can't parse - JSON.parse on any
+// single line of a pretty-printed object throws. These predate the >=0.39
+// journal format and are not observed to approach the whole-file cap, so a
+// bounded whole-file read is fine here.
+async function readLegacySingleJsonSession(path: string): Promise<GeminiSession | null> {
+  const raw = await readSessionFile(path)
+  if (raw === null) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed.messages && parsed.sessionId) return parsed as GeminiSession
+  } catch { /* not single JSON */ }
+  return null
+}
+
 function createParser(source: SessionSource, seenKeys: Set<string>): SessionParser {
   return {
     async *parse(): AsyncGenerator<ParsedProviderCall> {
-      const raw = await readSessionFile(source.path)
-      if (raw === null) return
-
-      let data: GeminiSession | null = null
-
-      // Try single JSON first (Gemini CLI <=0.38), then JSONL (>=0.39)
-      try {
-        const parsed = JSON.parse(raw)
-        if (parsed.messages && parsed.sessionId) {
-          data = parsed
-        }
-      } catch { /* not single JSON */ }
-
-      if (!data) {
-        data = parseJsonl(raw)
-      }
-
+      // Try JSONL (>=0.39) first via streaming, then fall back to the legacy
+      // single-JSON format (<=0.38).
+      const data = await parseJsonlStreaming(source.path) ?? await readLegacySingleJsonSession(source.path)
       if (!data?.messages || !data.sessionId) return
 
       const calls = parseSession(data, seenKeys)

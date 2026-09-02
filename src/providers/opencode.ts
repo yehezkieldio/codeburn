@@ -27,10 +27,11 @@ function getDataDir(dataDir?: string): string {
   // (tmpDir/opencode/opencode*.db and tmpDir/opencode/storage/...).
   if (dataDir) return join(dataDir, 'opencode')
 
-  // Production override for OpenCode-compatible forks/renames (e.g. MiMoCode at
-  // ~/.local/share/mimocode). This is the EXACT data directory — no 'opencode'
-  // suffix — so a fork writing <dir>/<prefix>*.db or <dir>/storage/... is found
-  // instead of silently yielding zero sessions. (issue #617)
+  // Production override for OpenCode-compatible forks/renames not already
+  // covered by their own provider (MiMoCode has its own — see mimocode.ts).
+  // This is the EXACT data directory — no 'opencode' suffix — so a fork
+  // writing <dir>/<prefix>*.db or <dir>/storage/... is found instead of
+  // silently yielding zero sessions. (issue #617)
   const override = process.env['OPENCODE_DATA_DIR']
   if (override) return override
 

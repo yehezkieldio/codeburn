@@ -10,9 +10,10 @@ OpenCode (sst/opencode).
 
 Default `~/.local/share/opencode/` or `$XDG_DATA_HOME/opencode/`. The discovery walk picks up `opencode*.db` files (`opencode.ts:71-88`).
 
-For renamed/forked OpenCode-compatible builds (e.g. MiMoCode writing
-`~/.local/share/mimocode/mimicode.db` with the same `session`/`message`/`part`
-schema), point CodeBurn at the fork's data directory with two env vars:
+MiMoCode has its own provider (`docs/providers/mimocode.md`) and does not
+need this override anymore. For any other renamed/forked OpenCode-compatible
+build with the same `session`/`message`/`part` schema, point CodeBurn at the
+fork's data directory with two env vars:
 
 - `OPENCODE_DATA_DIR` — the **exact** data directory (no `opencode` suffix is
   appended). Example: `OPENCODE_DATA_DIR=$HOME/.local/share/mimocode`. Relocates
